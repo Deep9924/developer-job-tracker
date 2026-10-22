@@ -89,7 +89,7 @@ For each folder a run executes:
 
 ## 6. Delete and restore
 
-Each position has a Delete with a confirm step. Deleting removes it from the board and counts and blocks ONLY that specific posting from future runs — identified by its source link, or by company + role + posting date when no link is recorded — never the whole company or the title in general (a genuinely new posting with the same title at the same company files normally). A Deleted list shows deletions with Restore; restoring returns the position exactly as it was and lifts the block. There is no separate "excluded" status — Delete is the one removal method.
+Delete sits on each position's main card face: one tap deletes instantly, with NO confirmation step, and an Undo bar (about 15 seconds) appears — Undo restores the position exactly and lifts its posting block. Each folder also has a Select mode (checkboxes on the cards, Select all, a count) with a Delete selected action: that one DOES ask first, with a confirmation stating how many positions will be deleted, then deletes and offers the same single Undo to bring the whole batch back. Deleting removes the position from the board and counts and blocks ONLY that specific posting from future runs — identified by its source link, or by company + role + posting date when no link is recorded — never the whole company or the title in general (a genuinely new posting with the same title at the same company files normally). A Deleted list shows deletions with Restore; restoring returns the position exactly as it was and lifts the block. There is no separate "excluded" status — Delete is the one removal method.
 
 ## 7. The daily check (scheduled)
 
