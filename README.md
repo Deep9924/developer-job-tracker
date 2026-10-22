@@ -13,7 +13,7 @@ This repository does **not** contain a runnable app. Muse apps (artifacts) are p
 
 ## What's inside
 
-- `SETUP.md` — the full build spec: data model, board layout, folder/search settings, run behavior (live filing, progress, per-folder runs, token estimates), the listing-level speed rules, the daily check with fresh + catch-up lanes, and the standing rules (verified salary only, packages only for positions you select, delete = one specific posting).
+- `SETUP.md` — the full build spec: data model, board layout, folder/search settings, run behavior (live filing, progress, per-folder runs, token estimates), the listing-level speed rules, the daily check with fresh + catch-up lanes, and the standing rules (verified salary only, packages only for positions you select, delete = one specific posting). Its appendix is the exact technical specification — tables, fields, actions, constants, and derived rules — so a rebuild matches the original's behavior, not just its idea.
 
 ## Privacy
 

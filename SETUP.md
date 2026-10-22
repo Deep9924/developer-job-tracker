@@ -4,6 +4,8 @@ Paste this whole file to your Muse. It will ask you for the bracketed details, t
 
 Everything in [BRACKETS] is yours to fill in. Nothing here is anyone else's real data.
 
+**For the Muse building this: sections 1-8 describe the product. The APPENDIX at the end is normative — exact tables, fields, actions, constants, and rules. Build to the appendix where the two differ in precision.**
+
 ---
 
 ## 1. Who I am (the Muse should ask me for these if I didn't fill them in)
@@ -114,3 +116,130 @@ Create a scheduled agent job, daily at [06:00 MY TIMEZONE], owned by my job-sear
 - **Never apply, submit, or message an employer on my behalf.** Finding, verifying, and tracking are the job; submitting is mine.
 - **Packages**: tailored resumes/cover letters are built ONLY for positions I select (dashboard switch or naming them in chat). New finds are always filed Not drafted, package off. The check itself never builds packages.
 - Verification testing happens only in the sandbox copy — never start or drive check runs against the live tracker just to test a build.
+
+---
+
+# APPENDIX — Exact technical specification (normative)
+
+Build to this appendix. Where sections 1-8 and the appendix differ in precision, the appendix wins.
+
+## A1. Data model (tables and fields)
+
+**positions**
+- id; profile_id (folder, nullable = unfiled); company (text); role (text); location (text)
+- salary_text (exactly as the posting states it, e.g. "$50-$55/hour" or "CAD $133,000-$183,000"); salary_source: `verified` (employer-stated) or `unverified` (board/aggregator); no salary = empty salary_text and the card shows "No salary posted"
+- source_url (nullable; http/https only — writes with any other scheme are rejected, and the render of "View posting" is defensively guarded the same way)
+- posted_date (YYYY-MM-DD, real calendar date, validated); deadline (YYYY-MM-DD, nullable — only when the posting states an ending/apply-by date; never inferred)
+- employment_types (array of canonical types, from the posting's own statement, normalized per A4; empty when the posting states none)
+- arrangement (remote / hybrid / on-site, only as stated)
+- catch_up (boolean — true when found in the catch-up lane)
+- status: one of `new`, `package_ready`, `intro_drafted`, `applied`, `interviewing`, `offer`, `rejected`, `closed` (display labels: New find, Package ready, Intro drafted, Applied, Interviewing, Offer, Rejected, Closed)
+- package_selected (boolean, default false); documents status derived from document_files (not drafted until files exist)
+- note (fit/gate text, e.g. eligibility flags, honest gaps); job_description (text, when captured)
+- created_at / found ordering fields so "newest first" is deterministic within the pre-sort list (the board re-sorts per A6)
+
+**search_profiles** (folders)
+- id; name; active (boolean — the on/off switch)
+- include_terms[]; exclude_terms[]
+- employment_types[]; type_match: `any` | `all`
+- salary_min_hourly (number, nullable); salary_min_yearly (number, nullable); include_no_salary (boolean, default true)
+- regions[]
+- sites[]; excluded_sites[]; whole_web (boolean — the "Also search the whole web" switch). Derived site mode: whole_web on + sites non-empty = `priority`; whole_web on + sites empty = `blacklist` (web sweep, excluded_sites skipped, listed sites included in the pool); whole_web off = `whitelist` (only sites). Store the derived inputs, compute the mode; excluded_sites are skipped in every mode.
+- companies[]; categories[]
+- skills[]; skills_match: `any` | `all`
+- levels[] (subset of entry/mid/senior)
+- arrangements[] (subset of remote/hybrid/on-site)
+- search_days (integer 1-90, nullable; null = 30)
+
+**deleted_positions**
+- A full snapshot of the position row at deletion time, plus: source_url (copied), note (why deleted, e.g. a run-pruning note), deleted_at.
+- The future-run block key is: source_url when present, else company + role + posted_date. Matching uses the same similar-wording normalization as titles. Restore returns the position exactly as snapshotted and removes the block.
+
+**document_files**
+- id; position_id; kind: `resume` | `cover_letter`; format: `pdf` | `docx`; the file blob stored in the artifact's storage; filename follows `Deep-Patel-Resume-<Company>` style with the user's own name: `<First>-<Last>-Resume-<CompanyToken>.pdf/.docx` and `<First>-<Last>-Cover-Letter-<CompanyToken>`.
+
+**check_runs**
+- id; scope: `all` | `profile`; profile_id + profile_name (nullable for `all`); status: `running` | `done` | `failed` | `cancelled`
+- started_at; finished_at (nullable); message (outcome/failure text)
+- added; catch_up; closed; updated (counts)
+- task_id (the spawned worker's handle)
+- progress_note (current step text); progress_updated_at (nullable)
+- token_estimate (the pre-run estimate shown during the run); token_usage (the run's own reported figure, nullable until reported)
+- folders_total; folder_estimates (per-folder estimates for multi-folder runs); skip_counts (map of reason → count); skipped_summary (the one-line text)
+
+**check_log**
+- id; entry text (dated run lines and material-change lines); created_at. Displayed newest-first in a collapsed-by-default section; the register file mirrors these lines.
+
+**Indexes**: positions(profile_id), positions(company), deleted_positions(source_url), check_runs(status).
+
+## A2. Actions (the artifact's complete action surface)
+
+1. `getstate` — everything the board renders in one call: positions, profiles, deleted_positions, document metadata, check_log, latest run, **all currently running runs** (running_runs array), and counts. While any run is running the client polls getstate every **5 seconds**; otherwise it does not poll.
+2. `add_position` / `update_position` / `upsert_position` — manual position management. All inputs bounded (string/array length caps); dates validated as real YYYY-MM-DD; source_url must be empty or http(s).
+3. `apply_partial_results` — the live-filing path used DURING a run: files new finds for a specific run_id as they are verified (same gates as the final report — salary, type, site, window, deleted-block, dedupe), increments the run's counters, and sets progress_note/progress_updated_at. A progress-only call (no finds) is valid and is how the worker checks in. Refused (files nothing) when the run is not in `running` status — this is what makes cancelled runs refuse late results.
+4. `apply_check_results` — the run's final report: closures, updates to tracked positions, pruning (A5), any finds not already filed live, the skipped summary, and the run's reported token usage; closes the run as `done`.
+5. `append_check_log` — appends a dated log line.
+6. `add_profile` / `update_profile` / `delete_profile` — folder CRUD with the fields in A1.
+7. `run_position_check` — starts a run. With a profile_id: runs that one folder **even if its switch is off**. Without: runs only folders with active = true (no broad fallback when none are on). Guard is **per folder**: a folder with a run already `running` refuses a second run for itself; other folders are unaffected. "Run check now" skips folders already running. Spawning: the worker is spawned with a dedupe key unique to the run row, `position-check-run-<run_id>` — NEVER a per-folder key (a shared key returns a finished worker's handle and the run hangs silently). Immediately after spawning, the task's status is checked; if it already reads finished/terminal, the run is failed on the spot with the message "The check could not get a live worker."
+8. `cancel_position_check` — per run: closes the run row as `cancelled`; filed positions stay; the spawned task itself cannot be force-stopped through its handle (its later reports are refused by rule 3). A second cancel is a no-op; an open cancel confirmation closes automatically when the run ends.
+9. `delete_position` — single delete: snapshots the row into deleted_positions, removes it from positions, returns the deleted record's id (the client's Undo targets exactly that id). NO confirmation in the UI.
+10. `delete_positions` — bulk delete for folder multi-select: same snapshot semantics per position. The UI confirms first, stating the count.
+11. `restore_position` / `restore_positions` — restore from a deleted snapshot (single and bulk share one server helper): the position returns exactly as snapshotted and its block is removed.
+
+Authorization note: the artifact itself has no in-app user/role system; access rests on the platform restricting the artifact to its owner. State this in a comment at the top of the actions file so nobody mistakes it for an oversight.
+
+## A3. Salary rules
+
+- A posting's pay kind is as the posting states it — hourly or yearly — never converted.
+- Classification: an explicit unit marker in the salary text ("/hour", "per hour", "/yr", "per year", "annually", etc.) always wins. Otherwise the TOP figure of the stated range classifies for all sources: **< 1000 = hourly, >= 1000 = yearly**. Figures themselves are never changed.
+- Folder salary gate: an hourly posting files only if the top of its stated hourly range >= the folder's salary_min_hourly (no hourly minimum set = unrestricted); yearly likewise against salary_min_yearly. A posting with no parseable salary counts as no-salary and files only when include_no_salary is on. Salary skips are tallied in the run's skip_counts under `salary`.
+- Board salary filter uses the same classification and the same two independent minimums; minimums never cross-apply.
+- Labels: salary shows with `verified` only when employer-stated; board/aggregator figures are `unverified`. Never invent a range.
+
+## A4. Matching rules (shared by the board, the server, and the run instructions — implement ONCE in a shared module both sides import)
+
+- **Title matching** is by similar wording: normalize case, hyphens, spacing, and word order; punctuation ignored. "Full-Stack", "Fullstack", "Full Stack" are one wording.
+- **Type normalization**: canonical set = full-time, part-time, permanent, contract, temporary, casual, seasonal, term, internship. Ignore hyphens/spaces ("full time" = "full-time"); one-word forms count ("fulltime", "parttime"); abbreviations FT/PT count; combinations split ("casual part-time" = casual AND part-time; "permanent, full-time" = both; "term or contract" = term + contract; "fixed-term" = term). Type-match `any`: the posting matches if ANY type it names is selected. `all`: it must name EVERY selected type. A posting that states no type fails a folder that has types selected in `all` mode, and passes type filtering in `any` mode only if it names at least one selected type — when in doubt, the posting's own statement rules; never infer a type.
+- **Level derivation**: title/requirements naming Senior, Sr., Lead, Principal, Staff, or 5+ years = senior; Junior, entry-level, new grad = entry; anything else or unclear = mid. A posting files only if its derived level is in the folder's levels (empty = unrestricted).
+- **Arrangement**: as the posting states it (remote/hybrid/on-site), normalized spelling variants only. A posting files only if its stated arrangement is selected (empty = unrestricted); a remote-only folder skips on-site postings entirely (skip reason tallied, not filed as gated).
+- **Skills**: matched against the posting's description/body text, `any` = at least one listed skill mentioned, `all` = every one. Empty = unrestricted. This is a body-level check: it can only run on a candidate that survived the listing gate (A5).
+- **Discovery lanes**: age = today − posted_date, in the user's timezone. Fresh lane: age 0-6 days... precisely: posted within the last 7 days. The "Just posted" pill and folder "fresh" counts use age 0-2 days. Catch-up lane: age 8 days up to the folder's search_days (null = 30, clamped 1-90). A folder with search_days < 8 has NO catch-up lane. Finds older than the folder's limit are skipped with reason `old`. Undated postings are outside discovery. Tracked postings are re-verified regardless of age.
+
+## A5. Filing gates, dedupe, pruning (server-side, on every report)
+
+Order per candidate: (1) deleted-block check (A1 key) → skip silently as blocked; (2) dedupe against live positions by company + role + source link — the dedupe index is reloaded on EVERY partial/final report, so concurrent runs on different folders resolve an already-filed posting to the live row instead of double-filing; (3) folder gates: window/lane (A4), title (if include_terms non-empty), excludes, types (A4), salary (A3), skills (body), level, arrangement, site mode/excluded sites. Any failure = skip, tallied by reason in skip_counts (reasons: salary, job type, duplicate, old, title, site, level, arrangement, skills, other). Nothing about a recorded fact (salary, deadline, types) may come from anywhere but the posting itself.
+
+**Listing-level gate (run instructions)**: before any detail fetch, judge from the listing: title wording, shown posting date vs the window, region, stated type/salary/arrangement, source/site, duplicates. First visible mismatch = skip + tally, no fetch. Detail pages open only for survivors; body-level checks (skills, unstated fields) then run in full. Results pages are fetched once and screened whole. A tracked posting whose listing shows it still listed with the same deadline is re-verified from the listing — no detail fetch. High-volume sources: cap 200 candidate listings per folder per source; progress and the log state "Checked N of M listings" and mark a capped sweep as partial coverage.
+
+**Pruning**: when a run executes a folder, re-check that folder's already-filed positions against the folder's CURRENT filters. A non-matching position is moved to deleted_positions (with the note that the run removed it for no longer matching the folder's filters) ONLY if its status is `new`. Any other status is never pruned. Pruned counts are reported in the run's log line and outcome. Filter edits and board filtering never prune.
+
+## A6. Board rendering (exact behaviors)
+
+- One implementation of each rule: salary parsing/classification, types, arrangements, dates, level, URL safety live in ONE shared module imported by client and server. (The original drifted when these were copied: "fresh" meant 0-2 days in the client and 0-6 on the server. The two named rules — Just posted 0-2d, fresh lane 0-6d — are separate on purpose.)
+- Folder summary line segments, in order, each only when non-zero: "N positions", "· X closing soon" (deadline within 7 days), "· X fresh" (posted 0-2 days ago), "· X closed".
+- Position order within a folder: status group order first (New, Package ready, Intro drafted, Applied, Interviewing, Offer, Rejected, Closed); WITHIN each status group, deadline ascending with no-deadline LAST (sort key fallback "9999-12-31"); ties break by company A-Z. The same deadline-first ordering applies inside every single-status filter view. Closing-soon view uses the same rule.
+- Status line: always rendered, fixed height (44px). Idle text: "Last run: <Mon D, h:mm a.m./p.m.>" — date/time only, no folder name, no outcome words. Running: spinner + progress (A7).
+- Folder run slot: fixed width (11rem) on the header row; Run (compact, ~51x40px) swaps in place to Running… + Cancel within the same slot at constant height. The folder switch is a standard 48px pill; all switches on the board are ONE shared component.
+- Filter box: ONE bordered box containing the search bar, the status row (one horizontally scrollable row of uniform 40px cells inside its own container; no page-level horizontal scroll; active cell = filled + bold; chips do not take focus on tap), and the Advanced filters expander (collapsed summary shows the set values). Search matches company/role/location and combines with status + salary filters. Exactly ONE clear × per search bar — a standard 40px button with a 16px glyph; native browser clear suppressed (::-webkit-search-cancel-button hidden).
+- Mobile boxes: main info only, tap expands in place; desktop boxes show everything, folders always open.
+- Dates on cards: deadline at top-right as "Nov 18" plus relative "in 28 days" / "tomorrow" / "today"; posted age appears ONCE, in brackets in the meta line: "Posted Oct 8 (13 days ago)", "(today)", "(yesterday)".
+- Scrolling: plain browser default. NO custom scroll CSS/JS of any kind (no overflow/overscroll/touch-action/scroll-restoration overrides, no JS scroll management). This is deliberate — layered scroll fixes caused device bugs; plain won.
+- Closing-soon banner: tapping scrolls to and expands the position; the scroll/focus request fires ONLY on a banner tap, never on load or refresh.
+
+## A7. Run engine (exact behaviors)
+
+- The run's worker instructions (built server-side per run) open with: a **check-in first** — an immediate progress-only partial report per folder before any searching — then re-verify, then discover (A5 gate order), filing each find live via apply_partial_results as it is verified, with progress notes as it goes ("Checked N of M listings…" on sweeps). The final apply_check_results carries only what wasn't filed live, plus closures, updates, pruning, skip_counts, and the run's token usage figure.
+- **Progress block** per running run (fixed height, inside the folder's block / status area): elapsed timer ticking every second from started_at; current progress_note (fallback "Starting…"); counts filed so far (from the run's counters; when all zero the line reads "Nothing filed yet — finds appear on the board as they're found."); a progress bar; "Folder X of Y" for multi-folder runs; the token estimate (A7 below); a Cancel control for that run.
+- **Token estimate**: at run start, per folder, estimate = the median of that folder's last 5 finished runs' reported token_usage; if the folder has none, the median of any folder's recent reported usages; if none exist at all, a flat base of 50,000. Shown as "≈ N tokens" and stored on the run row (token_estimate; per-folder breakdown in folder_estimates). A finished run's own reported usage is stored (token_usage) and shown on its Last run line next to the skipped summary. Estimates are always labeled with "≈".
+- **Watchdog** (evaluated on getstate / run start / cancel): a `running` run with progress_updated_at NULL and now − started_at > **10 minutes** → failed, message "The check never reported in — no worker checked in within 10 minutes." A run that HAS reported and now − progress_updated_at > **20 minutes** → failed as gone quiet. A run whose worker task already reads finished while the row is still `running` → closed as failed on sight. **90 minutes** from started_at remains the absolute cap for any still-running row.
+- Multi-folder `all` runs execute their folders under ONE run row with folders_total set and per-folder progress in the progress note; per-folder (profile) runs are separate rows. (Per-folder concurrency in A2.7 still applies: an `all` run and a profile run for a different folder may coexist; the per-folder guard prevents the same folder being executed twice at once.)
+
+## A8. The register file and the daily check
+
+- Register path pattern: `~/workspace/goals/<goal-slug>/hidden_files/position-check-register.md`. Contents: standing rules header; tracked positions table (company, role, location, salary + source label, status, gate/deadline, notes); a section per discovery source batch; a Deleted positions table; a search-profiles mirror section (kept in sync with the dashboard whenever either changes); a Closed section; a dated check log at the end. The dashboard and the register must match after every run; when they diverge, reconcile during the run and note it in the log.
+- The daily check is a scheduled agent job (cron), daily 06:00 in the user's timezone, delivery to the goal's chat, owner = the goal. Its body carries: the standing rules (section 8), the profile semantics (A3-A5), live filing (file each find as verified; never file twice), and a log line that ENDS with the skipped summary + the run's estimated token usage ("≈ N tokens"). The reminder shape is section 7, exactly.
+- Material changes (a strong new match, a closure, a deadline within 7 days, any pruning) also add a timeline entry to the goal.
+
+## A9. Documents (packages)
+
+Only for positions the user selects. Per selected position: a tailored one-page resume (PDF + DOCX) and a matching cover letter (PDF + DOCX), built ONLY from the user's verified resume facts (section 1), stored as that position's document_files and attached on its card. Tailoring = rewording into the posting's language and ordering the user's real experience for that role; gaps the posting requires are named honestly in the cover letter, never claimed. The position's status becomes Package ready when its package exists.
